@@ -1,6 +1,7 @@
 _docs/
 _proc/
 
+*.wav
 *.bak
 .gitattributes
 .last_checked
