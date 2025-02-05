@@ -4,14 +4,17 @@
 __all__ = ['Pipeline']
 
 # %% ../nbs/7. Pipeline.ipynb 1
+import threading
 from os.path import expanduser
 import torch
+import torchaudio
+from pathlib import Path
+import traceback
+
 from whisperspeech.t2s_up_wds_mlang_enclm import TSARTransformer
 from whisperspeech.s2a_delar_mup_wds_mlang import SADelARTransformer
 from whisperspeech.a2wav import Vocoder
 from whisperspeech import inference, s2a_delar_mup_wds_mlang_cond
-import traceback
-from pathlib import Path
 
 # %% ../nbs/7. Pipeline.ipynb 2
 class Pipeline:
@@ -43,17 +46,25 @@ class Pipeline:
     )
     
     def __init__(self, t2s_ref=None, s2a_ref=None, optimize=True, torch_compile=False, device=None):
+        # Initialize locks for thread safety
+        self.t2s_lock = threading.Lock()
+        self.s2a_lock = threading.Lock()
+        self.vocoder_lock = threading.Lock()
+        self.encoder_lock = threading.Lock()
+        
         if device is None: device = inference.get_compute_device()
         self.device = device
         args = dict(device = device)
         try:
             if t2s_ref:
                 args["ref"] = t2s_ref
-            self.t2s = TSARTransformer.load_model(**args)  # use obtained compute device
-            if optimize: self.t2s.optimize(torch_compile=torch_compile)
+            with self.t2s_lock:
+                self.t2s = TSARTransformer.load_model(**args)
+                if optimize: self.t2s.optimize(torch_compile=torch_compile)
         except:
             print("Failed to load the T2S model:")
             print(traceback.format_exc())
+            
         args = dict(device = device)
         try:
             if s2a_ref:
@@ -66,29 +77,36 @@ class Pipeline:
                     args['spec'] = spec
             else:
                 cls = SADelARTransformer
-            self.s2a = cls.load_model(**args)  # use obtained compute device
-            if optimize: self.s2a.optimize(torch_compile=torch_compile)
+            with self.s2a_lock:
+                self.s2a = cls.load_model(**args)
+                if optimize: self.s2a.optimize(torch_compile=torch_compile)
         except:
             print("Failed to load the S2A model:")
             print(traceback.format_exc())
 
-        self.vocoder = Vocoder(device=device)
+        with self.vocoder_lock:
+            self.vocoder = Vocoder(device=device)
+            
         self.encoder = None
 
     def extract_spk_emb(self, fname):
-        """Extracts a speaker embedding from the first 30 seconds of the give audio file.
-        """
-        import torchaudio
+        """Extracts a speaker embedding from the first 30 seconds of the given audio file."""
+        # Double-checked locking pattern for encoder initialization
         if self.encoder is None:
-            device = self.device
-            if device == 'mps': device = 'cpu' # operator 'aten::_fft_r2c' is not currently implemented for the MPS device
-            from speechbrain.pretrained import EncoderClassifier
-            self.encoder = EncoderClassifier.from_hparams("speechbrain/spkrec-ecapa-voxceleb",
-                                                          savedir=expanduser("~/.cache/speechbrain/"),
-                                                          run_opts={"device": device})
+            with self.encoder_lock:
+                if self.encoder is None:
+                    device = self.device
+                    if device == 'mps': device = 'cpu'
+                    from speechbrain.pretrained import EncoderClassifier
+                    self.encoder = EncoderClassifier.from_hparams(
+                        "speechbrain/spkrec-ecapa-voxceleb",
+                        savedir=expanduser("~/.cache/speechbrain/"),
+                        run_opts={"device": device}
+                    )
+                    
         audio_info = torchaudio.info(fname)
         actual_sample_rate = audio_info.sample_rate
-        num_frames = actual_sample_rate * 30 # specify 30 seconds worth of frames
+        num_frames = actual_sample_rate * 30
         samples, sr = torchaudio.load(fname, num_frames=num_frames)
         samples = samples[:, :num_frames]
         samples = self.encoder.audio_normalizer(samples[0], sr)
@@ -97,18 +115,36 @@ class Pipeline:
         return spk_emb[0,0].to(self.device)
         
     def generate_atoks(self, text, speaker=None, lang='en', cps=15, step_callback=None):
-        if speaker is None: speaker = self.default_speaker
-        elif isinstance(speaker, (str, Path)): speaker = self.extract_spk_emb(speaker)
+        if speaker is None: 
+            speaker = self.default_speaker
+        elif isinstance(speaker, (str, Path)):
+            speaker = self.extract_spk_emb(speaker)
+            
         text = text.replace("\n", " ")
-        stoks = self.t2s.generate(text, cps=cps, lang=lang, step=step_callback)[0]
-        atoks = self.s2a.generate(stoks, speaker.unsqueeze(0), step=step_callback)
+        
+        with self.t2s_lock:
+            stoks = self.t2s.generate(text, cps=cps, lang=lang, step=step_callback)[0]
+            
+        with self.s2a_lock:
+            atoks = self.s2a.generate(stoks, speaker.unsqueeze(0), step=step_callback)
+            
         return atoks
         
     def generate(self, text, speaker=None, lang='en', cps=15, step_callback=None):
-        return self.vocoder.decode(self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=step_callback))
+        with self.vocoder_lock:
+            return self.vocoder.decode(
+                self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=step_callback)
+            )
     
     def generate_to_file(self, fname, text, speaker=None, lang='en', cps=15, step_callback=None):
-        self.vocoder.decode_to_file(fname, self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None))
-        
+        with self.vocoder_lock:
+            self.vocoder.decode_to_file(
+                fname, 
+                self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None)
+            )
+            
     def generate_to_notebook(self, text, speaker=None, lang='en', cps=15, step_callback=None):
-        self.vocoder.decode_to_notebook(self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None))
+        with self.vocoder_lock:
+            self.vocoder.decode_to_notebook(
+                self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None)
+            )
