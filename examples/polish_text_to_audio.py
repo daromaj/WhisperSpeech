@@ -20,7 +20,7 @@ audio_queue = queue.Queue()
 
 def generate_and_play(pipe, text, playback_event):
     # Generate audio and put it in the queue
-    audio_tensor = pipe.generate(text, lang="pl", cps=14)
+    audio_tensor = pipe.generate(text, lang="pl", cps=13)
     audio_np = (audio_tensor.cpu().numpy() * 32767).astype(np.int16)
     if len(audio_np.shape) == 1:
         audio_np = np.expand_dims(audio_np, axis=0)
@@ -41,8 +41,9 @@ def generate_and_play(pipe, text, playback_event):
             time.sleep(0.05)  # Introduce a 50ms delay
             playback_event.set()  # Signal that this playback has finished
 
-    playback_thread = threading.Thread(target=play_audio)
+    playback_thread = threading.Thread(target=play_audio, daemon=True)
     playback_thread.start()
+    return playback_thread
 
 # Polish text samples
 texts = [
@@ -56,9 +57,17 @@ texts = [
 playback_event = threading.Event()
 playback_event.set()  # Initial state: playback can start
 
+# Keep track of all playback threads
+playback_threads = []
+
 for text in texts:
     print(f"Generating: {text}")
-    generate_and_play(pipe, text, playback_event)
+    thread = generate_and_play(pipe, text, playback_event)
+    playback_threads.append(thread)
+
+# Signal all playback threads to exit
+for _ in playback_threads:
+    audio_queue.put(None)
 
 
 print("Script complete. Check 'output.wav' for the generated audio.")
