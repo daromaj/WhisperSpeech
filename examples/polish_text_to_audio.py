@@ -11,7 +11,8 @@ from whisperspeech.pipeline import Pipeline
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
-pipe = Pipeline(device=device)
+model_ref = 'collabora/whisperspeech:s2a-q4-base-en+pl.model'
+pipe = Pipeline(s2a_ref=model_ref, device=device)
 
 
 # Initialize queue
@@ -20,7 +21,7 @@ audio_queue = queue.Queue()
 
 def generate_and_play(pipe, text, playback_event):
     # Generate audio and put it in the queue
-    audio_tensor = pipe.generate(text, lang="pl", cps=13)
+    audio_tensor = pipe.generate(text, lang="pl", cps=14)
     audio_np = (audio_tensor.cpu().numpy() * 32767).astype(np.int16)
     if len(audio_np.shape) == 1:
         audio_np = np.expand_dims(audio_np, axis=0)
