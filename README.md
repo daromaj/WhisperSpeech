@@ -264,6 +264,10 @@ We rely on many amazing Open Source projects and research papers:
 }
 ```
 
+## Update on torch Libraries
+
+The torch, torchvision, and torchaudio libraries have been updated to version 2.6.0+cu126 to support CUDA 12.6. These updates enhance the performance and compatibility of the WhisperSpeech project.
+
 ## Update on polish_text_to_audio.py
 
 Recent updates have been made to the polish_text_to_audio.py file to fix the following issues:

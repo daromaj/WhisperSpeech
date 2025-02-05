@@ -1,15 +1,24 @@
+import torch
 import numpy as np
 
 import queue
+import sounddevice as sd
+import threading
+import time
 
 from whisperspeech.pipeline import Pipeline
 
-pipe = Pipeline()
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+pipe = Pipeline(device=device)
+
 
 # Initialize queue
 audio_queue = queue.Queue()
 
-def generate_and_play(pipe, text):
+
+def generate_and_play(pipe, text, playback_event):
     # Generate audio and put it in the queue
     audio_tensor = pipe.generate(text, lang="pl", cps=14)
     audio_np = (audio_tensor.cpu().numpy() * 32767).astype(np.int16)
@@ -25,8 +34,12 @@ def generate_and_play(pipe, text):
             audio_np = audio_queue.get()
             if audio_np is None:
                 break
+            playback_event.wait()  # Wait for the previous playback to finish
+            playback_event.clear()  # Reset the event
             sd.play(audio_np, samplerate=24000)
             sd.wait()
+            time.sleep(0.05)  # Introduce a 50ms delay
+            playback_event.set()  # Signal that this playback has finished
 
     playback_thread = threading.Thread(target=play_audio)
     playback_thread.start()
@@ -39,8 +52,13 @@ texts = [
 ]
 
 
+# Create an event to synchronize playback
+playback_event = threading.Event()
+playback_event.set()  # Initial state: playback can start
+
 for text in texts:
     print(f"Generating: {text}")
-    generate_and_play(pipe, text)
+    generate_and_play(pipe, text, playback_event)
+
 
 print("Script complete. Check 'output.wav' for the generated audio.")
